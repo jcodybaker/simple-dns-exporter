@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/prometheus/client_golang/prometheus"
@@ -47,15 +46,23 @@ func probe(ctx context.Context, target, server string) (metrics []prometheus.Met
 		Qtype:  dns.TypeA,
 		Qclass: dns.ClassINET,
 	}
-	before := time.Now()
-	r, err := dns.ExchangeContext(ctx, m, server)
+	c := &dns.Client{
+		Timeout: queryTimeout,
+	}
+	r, dur, err := c.ExchangeContext(ctx, m, server)
+	var errIsTimeout bool
 	if err != nil {
-		log.Printf("query err for %q on %q: %v", target, server, err)
+		log.Printf("query err(%T) for %q on %q: %v", err, target, server, err)
+		var timeoutErr interface{ Timeout() bool }
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			errIsTimeout = true
+		} else if errors.As(err, &timeoutErr) {
+			errIsTimeout = timeoutErr.Timeout()
+		}
 	}
 	if r == nil {
 		r = &dns.Msg{}
 	}
-	dur := time.Since(before)
 	// Each label combo is its own time-series in prom; we need to 0 out the other cases or prom
 	// will just assume it wasn't collected and fill the space.
 	metrics = append(metrics, prometheus.MustNewConstMetric(
@@ -89,14 +96,14 @@ func probe(ctx context.Context, target, server string) (metrics []prometheus.Met
 	metrics = append(metrics, prometheus.MustNewConstMetric(
 		outcomeDesc,
 		prometheus.GaugeValue,
-		b2f(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)),
+		b2f(errIsTimeout),
 		target,
 		server,
 		"timeout"))
 	metrics = append(metrics, prometheus.MustNewConstMetric(
 		outcomeDesc,
 		prometheus.GaugeValue,
-		b2f(err != nil && !(errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled))),
+		b2f(err != nil && !errIsTimeout),
 		target,
 		server,
 		"unknown_error"))

@@ -1,24 +1,35 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
-	defaultBindAddr = "0.0.0.0:9153"
+	defaultBindAddr     = "0.0.0.0:9153"
+	defaultQueryTimeout = 5 * time.Second
 )
+
+var queryTimeout time.Duration = defaultQueryTimeout
 
 func main() {
 	bindAddr := defaultBindAddr
 	if b := os.Getenv("BIND_ADDR"); b != "" {
 		bindAddr = b
+	}
+	if t := os.Getenv("QUERY_TIMEOUT"); t != "" {
+		var err error
+		if queryTimeout, err = time.ParseDuration(t); err != nil {
+			log.Fatal("parsing QUERY_TIMEOUT: %v", err)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -58,7 +69,11 @@ func handleProbe(w http.ResponseWriter, r *http.Request) {
 	if !strings.ContainsRune(server, ':') {
 		server = net.JoinHostPort(server, "53")
 	}
-	m := probe(r.Context(), target, server)
+	ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
+	defer cancel()
+	m := probe(ctx, target, server)
+	// disable connection reuse to spread query load across nodes.
+	w.Header().Add("connection", "close")
 	pr := prometheus.NewRegistry()
 	pr.MustRegister(&staticCollector{
 		descs:   dnsDescriptions,
